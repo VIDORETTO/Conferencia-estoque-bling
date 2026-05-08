@@ -68,15 +68,32 @@ interface ConferenceItem {
 }
 
 export default function App() {
+  const [isAppAuthenticated, setIsAppAuthenticated] = useState<boolean | null>(
+    null,
+  );
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
 
-  // Authentication Check
   useEffect(() => {
-    checkAuth();
+    checkAppAuth();
+  }, []);
 
+  const checkAppAuth = async () => {
+    try {
+      const res = await fetch("/api/app-session");
+      const data = await res.json();
+      setIsAppAuthenticated(!!data.authenticated);
+      if (data.authenticated) {
+        checkBlingAuth();
+      }
+    } catch {
+      setIsAppAuthenticated(false);
+    }
+  };
+
+  useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
-        checkAuth();
+        checkBlingAuth();
         toast.success("Conectado ao Bling com sucesso!");
       }
     };
@@ -84,7 +101,7 @@ export default function App() {
     return () => window.removeEventListener("message", handleMessage);
   }, []);
 
-  const checkAuth = async () => {
+  const checkBlingAuth = async () => {
     try {
       const res = await fetch("/api/me");
       const data = await res.json();
@@ -114,10 +131,21 @@ export default function App() {
     }
   };
 
-  if (isConnected === null)
+  if (isAppAuthenticated === null)
     return (
       <div className="flex h-screen items-center justify-center">
         Carregando...
+      </div>
+    );
+
+  if (!isAppAuthenticated) {
+    return <LoginScreen onLoginSuccess={checkAppAuth} />;
+  }
+
+  if (isConnected === null)
+    return (
+      <div className="flex h-screen items-center justify-center">
+        Carregando Bling...
       </div>
     );
 
@@ -158,10 +186,91 @@ export default function App() {
               Bipe ou procure produtos para conferir o estoque.
             </p>
           </div>
+          <Button
+            variant="ghost"
+            onClick={async () => {
+              await fetch("/api/app-logout", { method: "POST" });
+              checkAppAuth();
+            }}
+          >
+            Sair
+          </Button>
         </div>
 
         <ConferenceBoard />
       </div>
+    </div>
+  );
+}
+
+function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await fetch("/api/app-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        onLoginSuccess();
+      } else {
+        toast.error(data.error || "Login falhou");
+      }
+    } catch (err) {
+      toast.error("Erro ao fazer login");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex h-screen flex-col items-center justify-center bg-zinc-50 p-4 dark:bg-zinc-950">
+      <Toaster />
+      <Card className="w-full max-w-sm">
+        <CardHeader className="text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
+            <Layers className="h-6 w-6 text-primary" />
+          </div>
+          <CardTitle className="text-2xl">Acesso ao Sistema</CardTitle>
+          <CardDescription>
+            Insira suas credenciais para continuar
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="username">Usuário</Label>
+              <Input
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="password">Senha</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "Entrando..." : "Entrar"}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
