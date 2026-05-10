@@ -1,3 +1,4 @@
+import { apiFetch } from "./lib/apiFetch";
 import React, { useState, useEffect, useRef } from "react";
 import {
   Search,
@@ -79,7 +80,7 @@ export default function App() {
 
   const checkAppAuth = async () => {
     try {
-      const res = await fetch("/api/app-session");
+      const res = await apiFetch("/api/app-session");
       const data = await res.json();
       setIsAppAuthenticated(!!data.authenticated);
       if (data.authenticated) {
@@ -91,8 +92,25 @@ export default function App() {
   };
 
   useEffect(() => {
+    const handleAuthError = () => {
+      setIsAppAuthenticated(false);
+      localStorage.removeItem("app_auth_token");
+      toast.error("Sua sessão expirou. Por favor, faça login novamente.");
+    };
+
+    window.addEventListener("auth_error", handleAuthError);
+    return () => window.removeEventListener("auth_error", handleAuthError);
+  }, []);
+
+  useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
+        if (event.data?.access_token) {
+          localStorage.setItem("bling_access_token", event.data.access_token);
+        }
+        if (event.data?.refresh_token) {
+          localStorage.setItem("bling_refresh_token", event.data.refresh_token);
+        }
         checkBlingAuth();
         toast.success("Conectado ao Bling com sucesso!");
       }
@@ -103,7 +121,7 @@ export default function App() {
 
   const checkBlingAuth = async () => {
     try {
-      const res = await fetch("/api/me");
+      const res = await apiFetch("/api/me");
       const data = await res.json();
       setIsConnected(!!data.connected);
     } catch {
@@ -113,7 +131,7 @@ export default function App() {
 
   const handleConnect = async () => {
     try {
-      const response = await fetch("/api/auth/url");
+      const response = await apiFetch("/api/auth/url");
       if (!response.ok) throw new Error("Failed to get auth URL");
       const { url } = await response.json();
 
@@ -189,7 +207,10 @@ export default function App() {
           <Button
             variant="ghost"
             onClick={async () => {
-              await fetch("/api/app-logout", { method: "POST" });
+              localStorage.removeItem("app_auth_token");
+              localStorage.removeItem("bling_access_token");
+              localStorage.removeItem("bling_refresh_token");
+              await apiFetch("/api/app-logout", { method: "POST" });
               checkAppAuth();
             }}
           >
@@ -212,19 +233,28 @@ function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await fetch("/api/app-login", {
+      const res = await apiFetch("/api/app-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
-      const data = await res.json();
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        const text = await res.text();
+        throw new Error(`Server returned non-JSON: ${res.status} ${text.substring(0, 100)}`);
+      }
+
       if (res.ok && data.success) {
+        if (data.token) localStorage.setItem("app_auth_token", data.token);
         onLoginSuccess();
       } else {
         toast.error(data.error || "Login falhou");
       }
-    } catch (err) {
-      toast.error("Erro ao fazer login");
+    } catch (err: any) {
+      toast.error(err.message || "Erro ao fazer login");
     } finally {
       setLoading(false);
     }
@@ -291,7 +321,7 @@ function ConferenceBoard() {
     setIsSearching(true);
     try {
       // First try exactly by code/ean
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/products/search?q=${encodeURIComponent(term)}&criterio=${searchBy}`,
       );
       const data = await res.json();
@@ -662,7 +692,7 @@ function ProductDetailsEditor({
 
   const fetchFullProduct = async () => {
     try {
-      const res = await fetch(`/api/products/${product.id}`);
+      const res = await apiFetch(`/api/products/${product.id}`);
       if (res.ok) {
         const data = await res.json();
         let allImages: string[] = [];
@@ -682,7 +712,7 @@ function ProductDetailsEditor({
 
   const fetchStock = async () => {
     try {
-      const res = await fetch(`/api/products/stock/${product.id}`);
+      const res = await apiFetch(`/api/products/stock/${product.id}`);
       if (res.ok) {
         const data = await res.json();
         setExpectedQty(data.saldoFisicoTotal || data.saldoVirtualTotal || 0);
@@ -715,7 +745,7 @@ function ProductDetailsEditor({
           reader.readAsDataURL(file);
         });
 
-        const res = await fetch("/api/upload-image", {
+        const res = await apiFetch("/api/upload-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ imageBase64: base64Str }),
@@ -816,7 +846,7 @@ function ProductDetailsEditor({
         };
       }
 
-      const res = await fetch(`/api/products/${product.id}`, {
+      const res = await apiFetch(`/api/products/${product.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1125,11 +1155,19 @@ function BarcodeScanner({
   const [error, setError] = useState("");
   const isScanning = useRef(false);
 
+  const onScanRef = useRef(onScan);
+  useEffect(() => {
+    onScanRef.current = onScan;
+  }, [onScan]);
+
   useEffect(() => {
     let html5QrCode: Html5Qrcode;
+    let unmounted = false;
+    let startPromise: Promise<void> | null = null;
 
     Html5Qrcode.getCameras()
       .then((devices) => {
+        if (unmounted) return;
         if (devices && devices.length) {
           let cameraId = devices[0].id;
           for (const d of devices) {
@@ -1138,8 +1176,9 @@ function BarcodeScanner({
             }
           }
 
+          if (unmounted) return;
           html5QrCode = new Html5Qrcode("reader");
-          html5QrCode
+          startPromise = html5QrCode
             .start(
               cameraId,
               {
@@ -1150,7 +1189,7 @@ function BarcodeScanner({
                 // Prevent duplicate fast scans
                 if (isScanning.current) return;
                 isScanning.current = true;
-                onScan(decodedText);
+                onScanRef.current(decodedText);
                 setTimeout(() => {
                   isScanning.current = false;
                 }, 1500); // 1.5s delay between scans
@@ -1158,22 +1197,43 @@ function BarcodeScanner({
               () => {
                 // ignore errors during scan
               },
-            )
+            );
+            
+          startPromise
+            .then(() => {
+              if (unmounted) {
+                html5QrCode.stop().catch(console.error);
+              }
+            })
             .catch((err) => {
+              if (unmounted) return;
               setError(err.message || "Cannot start camera");
             });
         }
       })
       .catch((err) => {
-        setError(err.message || "Cannot get cameras");
+        if (!unmounted) {
+          setError(err.message || "Cannot get cameras");
+        }
       });
 
     return () => {
-      if (html5QrCode && html5QrCode.isScanning) {
+      unmounted = true;
+      if (startPromise) {
+        startPromise
+          .then(() => {
+            if (html5QrCode && html5QrCode.isScanning) {
+              html5QrCode.stop().catch(console.error);
+            }
+          })
+          .catch(() => {
+            // Ignore start errors as they are handled in the startPromise.catch
+          });
+      } else if (html5QrCode && html5QrCode.isScanning) {
         html5QrCode.stop().catch(console.error);
       }
     };
-  }, [onScan]);
+  }, []); // Run only once on mount
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black">

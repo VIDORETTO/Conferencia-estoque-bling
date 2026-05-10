@@ -20,5 +20,8 @@ export default defineConfig(({ mode }) => {
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR === "true" ? false : { protocol: "wss", clientPort: 443 },
     },
+    build: {
+      chunkSizeWarningLimit: 1500,
+    },
   };
 });

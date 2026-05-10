@@ -31,6 +31,10 @@ const safeCompare = (a: string, b: string) => {
 };
 
 // App session endpoints
+app.get("/api/debug-creds", (req, res) =>
+  res.json({ u: APP_USERNAME, p: APP_PASSWORD }),
+);
+
 app.post("/api/app-login", async (req, res) => {
   // Artificial delay to mitigate brute-force attacks
   await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -56,7 +60,7 @@ app.post("/api/app-login", async (req, res) => {
       sameSite: process.env.VERCEL ? "lax" : "none",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-    res.json({ success: true });
+    res.json({ success: true, token });
   } else {
     res.status(401).json({ error: "Credenciais inválidas" });
   }
@@ -72,7 +76,10 @@ app.post("/api/app-logout", (req, res) => {
 });
 
 app.get("/api/app-session", (req, res) => {
-  const token = req.cookies.app_auth_token;
+  let token = req.cookies.app_auth_token;
+  if (!token && req.headers.authorization) {
+    token = req.headers.authorization.split(" ")[1];
+  }
   if (!token) return res.json({ authenticated: false });
   try {
     jwt.verify(token, JWT_SECRET);
@@ -91,11 +98,15 @@ const requireAppAuth = (
   if (
     req.path === "/app-login" ||
     req.path === "/app-session" ||
-    req.path === "/app-logout"
+    req.path === "/app-logout" ||
+    req.path === "/debug-creds"
   ) {
     return next();
   }
-  const token = req.cookies.app_auth_token;
+  let token = req.cookies.app_auth_token;
+  if (!token && req.headers.authorization) {
+    token = req.headers.authorization.split(" ")[1];
+  }
   if (!token) return res.status(401).json({ error: "Unauthorized" });
   try {
     jwt.verify(token, JWT_SECRET);
@@ -103,6 +114,14 @@ const requireAppAuth = (
   } catch (e) {
     res.status(401).json({ error: "Unauthorized - Invalid token" });
   }
+};
+
+const getBlingToken = (req: express.Request) => {
+  let token = req.cookies.bling_access_token;
+  if (!token && req.headers["x-bling-token"]) {
+    token = req.headers["x-bling-token"] as string;
+  }
+  return token;
 };
 
 // Protect all /api routes
@@ -187,7 +206,11 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
           <body>
             <script>
               if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+                window.opener.postMessage({ 
+                  type: 'OAUTH_AUTH_SUCCESS',
+                  access_token: "${access_token}",
+                  refresh_token: "${refresh_token || ""}"
+                }, '*');
                 window.close();
               } else {
                 window.location.href = '/';
@@ -205,7 +228,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 
 app.get("/api/products/stock/:id", async (req, res) => {
   const { id } = req.params;
-  const token = req.cookies.bling_access_token;
+  const token = getBlingToken(req);
 
   if (!token) {
     return res.status(401).json({ error: "No Bling token found" });
@@ -254,7 +277,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
 // Proxy to get product
 app.get("/api/products/search", async (req, res) => {
   const { q, criterio } = req.query;
-  const token = req.cookies.bling_access_token;
+  const token = getBlingToken(req);
 
   if (!token) {
     return res.status(401).json({ error: "No Bling token found" });
@@ -306,7 +329,7 @@ app.get("/api/products/search", async (req, res) => {
 // Get full product details
 app.get("/api/products/:id", async (req, res) => {
   const id = req.params.id;
-  const token = req.cookies.bling_access_token;
+  const token = getBlingToken(req);
 
   if (!token) return res.status(401).json({ error: "No Bling token found" });
 
@@ -333,7 +356,7 @@ app.get("/api/products/:id", async (req, res) => {
 // Save product details
 app.put("/api/products/:id", async (req, res) => {
   const id = req.params.id;
-  const token = req.cookies.bling_access_token;
+  const token = getBlingToken(req);
 
   if (!token) return res.status(401).json({ error: "No Bling token found" });
 
@@ -401,32 +424,37 @@ app.post(
 );
 
 app.get("/api/me", async (req, res) => {
-  const token = req.cookies.bling_access_token;
+  const token = getBlingToken(req);
   if (!token) return res.json({ connected: false });
   return res.json({ connected: true });
 });
 
-// Vite middleware for development
-if (process.env.NODE_ENV !== "production") {
-  // Dynamic import to avoid crash in Vercel production
-  const { createServer: createViteServer } = await import("vite");
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: "spa",
-  });
-  app.use(vite.middlewares);
-} else {
-  const distPath = path.join(process.cwd(), "dist");
-  app.use(express.static(distPath));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
-  });
-}
+// Export the app for Vercel
+export default app;
 
-if (!process.env.VERCEL) {
+// Setup static serving or Vite middleware only in local development
+async function startLocalServer() {
+  if (process.env.NODE_ENV !== "production") {
+    // Dynamic import to avoid crash in Vercel production
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-export default app;
+if (!process.env.VERCEL) {
+  startLocalServer();
+}
