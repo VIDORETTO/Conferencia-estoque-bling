@@ -128,13 +128,20 @@ const getBlingToken = (req: express.Request) => {
 app.use("/api", requireAppAuth);
 
 // Get Redirect URI (handle both dev/prod URL)
-const getRedirectUri = () => {
-  return `${APP_URL}/auth/callback`;
+const getRedirectUri = (req: express.Request) => {
+  if (process.env.APP_URL) {
+    return `${process.env.APP_URL}/auth/callback`;
+  }
+  
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol;
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  
+  return `${protocol}://${host}/auth/callback`;
 };
 
 // Bling OAuth endpoints
 app.get("/api/auth/url", (req, res) => {
-  const redirectUri = getRedirectUri();
+  const redirectUri = getRedirectUri(req);
   const state = Math.random().toString(36).substring(7);
 
   // Set state in cookie to verify later (basic CSRF)
@@ -173,6 +180,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
       new URLSearchParams({
         grant_type: "authorization_code",
         code: code as string,
+        redirect_uri: getRedirectUri(req),
       }),
       {
         headers: {
