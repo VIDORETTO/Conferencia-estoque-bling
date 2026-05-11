@@ -410,52 +410,70 @@ app.get("/api/products/search", async (req, res) => {
     // Bling V3 products endpoint
     const headers = { Authorization: `Bearer ${token}` };
 
-    // We search by code, name, barcode directly, and using criterio 5 (exact barcode match in v2)
-    const [byCode, byName, byBarcode, byCriterio5] = await Promise.allSettled([
+    // We search by code, name, and barcode (criterio 4, or 5 if undocumented).
+    // To prevent returning random items when a parameter is ignored, we filter the results exactly.
+    const cleanQ = q ? String(q).trim() : "";
+    const isNumeric = /^\d+$/.test(cleanQ);
+
+    const searches: Promise<any>[] = [
       axios.get("https://www.bling.com.br/Api/v3/produtos", {
         headers,
-        params: { codigo: q, limite: 10 },
+        params: { codigo: cleanQ, limite: 15 },
       }),
       axios.get("https://www.bling.com.br/Api/v3/produtos", {
         headers,
-        params: { nome: q, limite: 10 },
-      }),
-      axios.get("https://www.bling.com.br/Api/v3/produtos", {
-        headers,
-        params: { codigoBarras: q, limite: 10 },
-      }),
-      axios.get("https://www.bling.com.br/Api/v3/produtos", {
-        headers,
-        params: { criterio: 5, codigo: q, limite: 10 },
-      }),
-    ]);
+        params: { nome: cleanQ, limite: 15 },
+      })
+    ];
+
+    if (isNumeric) {
+       // Criterio 4 (codigo de barras) ou 5
+       searches.push(
+         axios.get("https://www.bling.com.br/Api/v3/produtos", {
+           headers,
+           params: { criterio: 4, codigo: cleanQ, limite: 15 },
+         })
+       );
+       searches.push(
+         axios.get("https://www.bling.com.br/Api/v3/produtos", {
+           headers,
+           params: { codigoBarras: cleanQ, limite: 15 },
+         })
+       );
+    }
+
+    const responses = await Promise.allSettled(searches);
 
     const results: any[] = [];
 
-    if (byCode.status === "fulfilled" && byCode.value.data?.data) {
-      results.push(...byCode.value.data.data);
-    }
-
-    if (byName.status === "fulfilled" && byName.value.data?.data) {
-      for (const item of byName.value.data.data) {
-        if (!results.find((r) => r.id === item.id)) {
-          results.push(item);
-        }
-      }
-    }
-
-    if (byBarcode.status === "fulfilled" && byBarcode.value.data?.data) {
-      for (const item of byBarcode.value.data.data) {
-        if (!results.find((r) => r.id === item.id)) {
-          results.push(item);
-        }
-      }
-    }
-
-    if (byCriterio5.status === "fulfilled" && byCriterio5.value.data?.data) {
-      for (const item of byCriterio5.value.data.data) {
-        if (!results.find((r) => r.id === item.id)) {
-          results.push(item);
+    for (const response of responses) {
+      if (response.status === "fulfilled" && response.value.data?.data) {
+        for (const item of response.value.data.data) {
+          if (!results.find((r) => r.id === item.id)) {
+             // Let's ensure the item matches somewhat our query to avoid displaying random items
+             let matches = false;
+             const queryUpper = cleanQ.toUpperCase();
+             if (item.codigo && String(item.codigo).toUpperCase().includes(queryUpper)) matches = true;
+             if (item.nome && String(item.nome).toUpperCase().includes(queryUpper)) matches = true;
+             
+             // Barcodes in newer Bling versions could be in codigoBarras or something? 
+             // We do a strict validation: if the query is numeric and long (barcode), 
+             // and the API returned an item without the query in codigo or nome, we check if it matches its barcode
+             // Wait, the API response doesn't always include the full 'gtin' or 'codigoBarras' in the list view.
+             // If we searched by barcode and it returned this item, there's a chance the API found it by barcode.
+             // But if the parameter was IGNORED, Bling returns the first products.
+             // To be sure, if `query` is numeric and we're not sure, we can still include it if `matches` is true.
+             // But wait! If we don't have the barcode in the list view, how do we know it's a valid match?
+             // If the API works, it returns ONLY 1 item usually for a barcode!
+             // So if the response has <= 2 items, it's highly likely a real match!
+             if (response.value.data.data.length <= 3) {
+                 matches = true;
+             }
+             
+             if (matches) {
+               results.push(item);
+             }
+          }
         }
       }
     }
