@@ -130,13 +130,13 @@ app.use("/api", requireAppAuth);
 // Get Redirect URI (handle both dev/prod URL)
 const getRedirectUri = (req: express.Request) => {
   if (process.env.APP_URL) {
-    return `${process.env.APP_URL}/auth/callback`;
+    return `${process.env.APP_URL}/api/auth/callback`;
   }
-  
+
   const protocol = req.headers["x-forwarded-proto"] || req.protocol;
   const host = req.headers["x-forwarded-host"] || req.get("host");
-  
-  return `${protocol}://${host}/auth/callback`;
+
+  return `${protocol}://${host}/api/auth/callback`;
 };
 
 // Bling OAuth endpoints
@@ -265,11 +265,12 @@ app.get("/api/products/stock/:id", async (req, res) => {
         return res.json({
           saldoFisicoTotal: productStock.saldoFisicoTotal,
           saldoVirtualTotal: productStock.saldoVirtualTotal,
+          depositoId: productStock.depositos?.[0]?.id,
         });
       }
     }
 
-    res.json({ saldoFisicoTotal: 0, saldoVirtualTotal: 0 });
+    res.json({ saldoFisicoTotal: 0, saldoVirtualTotal: 0, depositoId: null });
   } catch (error: any) {
     console.error(
       "Error fetching stock:",
@@ -277,6 +278,65 @@ app.get("/api/products/stock/:id", async (req, res) => {
     );
     res.status(error.response?.status || 500).json({
       error: "Failed to fetch stock",
+      details: error.response?.data,
+    });
+  }
+});
+
+// Post stock balance operation
+app.post("/api/products/stock/:id", async (req, res) => {
+  const { id } = req.params;
+  const { quantidade, depositoId } = req.body;
+  const token = getBlingToken(req);
+
+  if (!token) {
+    return res.status(401).json({ error: "No Bling token found" });
+  }
+
+  try {
+    // If we don't have a specific deposit, try to fetch the default one
+    let targetDeposito = depositoId;
+    if (!targetDeposito) {
+      const depRes = await axios.get(
+        "https://www.bling.com.br/Api/v3/depositos",
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      if (depRes.data?.data?.length > 0) {
+        targetDeposito = depRes.data.data[0].id;
+      }
+    }
+
+    const payload = {
+      produto: { id: Number(id) },
+      deposito: { id: targetDeposito },
+      operacao: "B",
+      preco: 0,
+      custo: 0,
+      quantidade: Number(quantidade),
+      observacoes: "Balanço via aplicativo",
+    };
+
+    const response = await axios.post(
+      "https://www.bling.com.br/Api/v3/estoques",
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    res.json(response.data);
+  } catch (error: any) {
+    console.error(
+      "Error updating stock:",
+      error.response?.data || error.message,
+    );
+    res.status(error.response?.status || 500).json({
+      error: "Failed to update stock",
       details: error.response?.data,
     });
   }
@@ -293,35 +353,35 @@ app.get("/api/products/search", async (req, res) => {
 
   try {
     // Bling V3 products endpoint
-    // We can search by name, or code depending on the params
-    let params: Record<string, any> = {};
+    const headers = { Authorization: `Bearer ${token}` };
 
-    // If the query is an EAN/GTIN usually it's just code
-    // According to Bling API v3, /produtos allows filtering by id, codigo, etc.
-    // criterion 1 = Name, criterion 2 = code, criterion 5 = EAN.
-    // Let's pass 'criterio' param to know if it's name, sku etc.
-    if (criterio === "codigo") {
-      params.codigo = q;
-    } else if (criterio === "nome") {
-      params.nome = q;
-    } else {
-      params.nome = q; // generic fallback
+    // We search by both code and name, and combine results
+    const [byCode, byName] = await Promise.allSettled([
+      axios.get("https://www.bling.com.br/Api/v3/produtos", {
+        headers,
+        params: { codigo: q, limite: 10 },
+      }),
+      axios.get("https://www.bling.com.br/Api/v3/produtos", {
+        headers,
+        params: { nome: q, limite: 10 },
+      }),
+    ]);
+
+    const results: any[] = [];
+
+    if (byCode.status === "fulfilled" && byCode.value.data?.data) {
+      results.push(...byCode.value.data.data);
     }
 
-    // Include all params?
-    params = { ...params, limite: 10 };
+    if (byName.status === "fulfilled" && byName.value.data?.data) {
+      for (const item of byName.value.data.data) {
+        if (!results.find((r) => r.id === item.id)) {
+          results.push(item);
+        }
+      }
+    }
 
-    const response = await axios.get(
-      "https://www.bling.com.br/Api/v3/produtos",
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        params,
-      },
-    );
-
-    res.json(response.data.data);
+    res.json(results);
   } catch (error: any) {
     console.error(
       "Error fetching products:",

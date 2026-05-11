@@ -13,6 +13,7 @@ import {
   ScanLine,
   Trash,
   Maximize2,
+  SwitchCamera,
 } from "lucide-react";
 import * as xlsx from "xlsx";
 import { Toaster, toast } from "sonner";
@@ -238,13 +239,15 @@ function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
-      
+
       let data;
       try {
         data = await res.json();
       } catch (err) {
         const text = await res.text();
-        throw new Error(`Server returned non-JSON: ${res.status} ${text.substring(0, 100)}`);
+        throw new Error(
+          `Server returned non-JSON: ${res.status} ${text.substring(0, 100)}`,
+        );
       }
 
       if (res.ok && data.success) {
@@ -307,7 +310,6 @@ function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
 
 function ConferenceBoard() {
   const [searchTerm, setSearchTerm] = useState("");
-  const [searchBy, setSearchBy] = useState<"codigo" | "nome">("codigo");
   const [searchResults, setSearchResults] = useState<Product[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
@@ -322,7 +324,7 @@ function ConferenceBoard() {
     try {
       // First try exactly by code/ean
       const res = await apiFetch(
-        `/api/products/search?q=${encodeURIComponent(term)}&criterio=${searchBy}`,
+        `/api/products/search?q=${encodeURIComponent(term)}`,
       );
       const data = await res.json();
 
@@ -342,7 +344,7 @@ function ConferenceBoard() {
             "",
         }));
         setSearchResults(mappedData);
-        if (mappedData.length === 1 && searchBy === "codigo") {
+        if (mappedData.length === 1) {
           // Auto-select if exact one outcome by code
           // To make it smooth, let's assume if it is an exact match we pass true
           handleSelectProduct(mappedData[0], true);
@@ -414,14 +416,6 @@ function ConferenceBoard() {
             <Card>
               <CardContent className="pt-6">
                 <div className="flex gap-2">
-                  <select
-                    className="rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background flex-shrink-0"
-                    value={searchBy}
-                    onChange={(e) => setSearchBy(e.target.value as any)}
-                  >
-                    <option value="codigo">Cód/EAN</option>
-                    <option value="nome">Nome</option>
-                  </select>
                   <div className="relative flex-1">
                     <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-zinc-500" />
                     <Input
@@ -668,7 +662,9 @@ function ProductDetailsEditor({
   // Bling V3 brings stock in a separate endpoint usually,
   // but let's assume we allow user to type it purely for conference
   const [expectedQty, setExpectedQty] = useState<number>(0);
+  const [depositoId, setDepositoId] = useState<number | null>(null);
   const [realQty, setRealQty] = useState<number | "">("");
+
   const [barcodeScan, setBarcodeScan] = useState<string>("");
   const [isScannerOpen, setIsScannerOpen] = useState(false);
 
@@ -716,6 +712,9 @@ function ProductDetailsEditor({
       if (res.ok) {
         const data = await res.json();
         setExpectedQty(data.saldoFisicoTotal || data.saldoVirtualTotal || 0);
+        if (data.depositoId) {
+          setDepositoId(data.depositoId);
+        }
       } else {
         setExpectedQty(0);
       }
@@ -871,23 +870,52 @@ function ProductDetailsEditor({
       return;
     }
 
-    // Auto-save if they forgot to click "Salvar Alterações"
     const hasImageChanges =
       JSON.stringify(imagens) !==
       JSON.stringify(product.imagemURL ? [product.imagemURL] : []);
+    let modificationsArr = [...modifications.current];
+
     if (nome !== product.nome || codigo !== product.codigo || hasImageChanges) {
       await saveToBling();
+      if (hasImageChanges && !modificationsArr.includes("Foto Atualizada")) {
+        modificationsArr.push("Foto Atualizada");
+      }
     }
 
     const diff = Number(realQty) - expectedQty;
+
+    setIsSavingDetails(true);
+    try {
+      if (diff !== 0) {
+        // Enviar balanço do estoque local
+        const res = await apiFetch(`/api/products/stock/${product.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ quantidade: Number(realQty), depositoId }),
+        });
+
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.error || "Failed to update stock");
+        }
+        modificationsArr.push("Balanço de estoque via app");
+        toast.success("Balanço de estoque registrado no Bling!");
+      }
+    } catch (err: any) {
+      toast.error("Erro ao registrar balanço no Bling", {
+        description: err.message,
+      });
+    } finally {
+      setIsSavingDetails(false);
+    }
 
     onConfirm({
       product: { ...product, nome, codigo, imagemURL: imagens[0] || "" },
       expectedQty,
       realQty: Number(realQty),
       diff,
-      modified: modifications.current.length > 0 || hasImageChanges,
-      modifications: Array.from(new Set(modifications.current)),
+      modified: modificationsArr.length > 0 || hasImageChanges,
+      modifications: Array.from(new Set(modificationsArr)),
     });
   };
 
@@ -1153,6 +1181,9 @@ function BarcodeScanner({
   onClose: () => void;
 }) {
   const [error, setError] = useState("");
+  const [facingMode, setFacingMode] = useState<"environment" | "user">(
+    "environment",
+  );
   const isScanning = useRef(false);
 
   const onScanRef = useRef(onScan);
@@ -1165,60 +1196,46 @@ function BarcodeScanner({
     let unmounted = false;
     let startPromise: Promise<void> | null = null;
 
-    Html5Qrcode.getCameras()
-      .then((devices) => {
-        if (unmounted) return;
-        if (devices && devices.length) {
-          let cameraId = devices[0].id;
-          for (const d of devices) {
-            if (d.label?.toLowerCase().includes("back")) {
-              cameraId = d.id;
-            }
-          }
+    setError("");
 
+    const timer = setTimeout(() => {
+      if (unmounted) return;
+      html5QrCode = new Html5Qrcode("reader");
+      startPromise = html5QrCode.start(
+        { facingMode },
+        {
+          fps: 5,
+          qrbox: { width: 250, height: 150 },
+        },
+        (decodedText) => {
+          // Prevent duplicate fast scans
+          if (isScanning.current) return;
+          isScanning.current = true;
+          onScanRef.current(decodedText);
+          setTimeout(() => {
+            isScanning.current = false;
+          }, 1500); // 1.5s delay between scans
+        },
+        () => {
+          // ignore errors during scan
+        },
+      );
+
+      startPromise
+        .then(() => {
+          if (unmounted) {
+            html5QrCode.stop().catch(console.error);
+          }
+        })
+        .catch((err) => {
           if (unmounted) return;
-          html5QrCode = new Html5Qrcode("reader");
-          startPromise = html5QrCode
-            .start(
-              cameraId,
-              {
-                fps: 5,
-                qrbox: { width: 250, height: 150 },
-              },
-              (decodedText) => {
-                // Prevent duplicate fast scans
-                if (isScanning.current) return;
-                isScanning.current = true;
-                onScanRef.current(decodedText);
-                setTimeout(() => {
-                  isScanning.current = false;
-                }, 1500); // 1.5s delay between scans
-              },
-              () => {
-                // ignore errors during scan
-              },
-            );
-            
-          startPromise
-            .then(() => {
-              if (unmounted) {
-                html5QrCode.stop().catch(console.error);
-              }
-            })
-            .catch((err) => {
-              if (unmounted) return;
-              setError(err.message || "Cannot start camera");
-            });
-        }
-      })
-      .catch((err) => {
-        if (!unmounted) {
-          setError(err.message || "Cannot get cameras");
-        }
-      });
+          setError(err.message || "Cannot start camera");
+        });
+    }, 100);
 
     return () => {
       unmounted = true;
+      clearTimeout(timer);
       if (startPromise) {
         startPromise
           .then(() => {
@@ -1233,15 +1250,35 @@ function BarcodeScanner({
         html5QrCode.stop().catch(console.error);
       }
     };
-  }, []); // Run only once on mount
+  }, [facingMode]); // Run when facingMode changes
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black">
       <div className="flex p-4 justify-between items-center text-white bg-zinc-900 border-b border-zinc-800">
-        <span className="font-bold">Scanner EAN / GTIN</span>
-        <Button variant="ghost" onClick={onClose} size="icon">
-          <X className="h-6 w-6 text-white" />
-        </Button>
+        <span className="font-bold">Scanner</span>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            onClick={() =>
+              setFacingMode((prev) =>
+                prev === "environment" ? "user" : "environment",
+              )
+            }
+            size="icon"
+            title="Mudar câmera"
+            className="text-white hover:bg-zinc-800"
+          >
+            <SwitchCamera className="h-6 w-6" />
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={onClose}
+            size="icon"
+            className="text-white hover:bg-zinc-800"
+          >
+            <X className="h-6 w-6" />
+          </Button>
+        </div>
       </div>
       <div className="flex-1 flex flex-col items-center justify-center relative bg-black px-4">
         {error && (
