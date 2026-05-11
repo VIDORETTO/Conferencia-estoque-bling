@@ -16,6 +16,15 @@ const BLING_CLIENT_ID = process.env.BLING_CLIENT_ID;
 const BLING_CLIENT_SECRET = process.env.BLING_CLIENT_SECRET;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
+const handleBlingError = (error: any, defaultMessage: string, res: express.Response) => {
+  console.error(defaultMessage, error.response?.data || error.message);
+  if (error.response?.status === 401) {
+     res.status(401).json({ error: "No Bling token found", details: error.response?.data });
+  } else {
+     res.status(error.response?.status || 500).json({ error: defaultMessage, details: error.response?.data });
+  }
+};
+
 const APP_USERNAME = process.env.APP_USERNAME;
 const APP_PASSWORD = process.env.APP_PASSWORD;
 const JWT_SECRET =
@@ -116,12 +125,68 @@ const requireAppAuth = (
   }
 };
 
-const getBlingToken = (req: express.Request) => {
+const getBlingToken = async (req: express.Request, res: express.Response): Promise<string | null> => {
   let token = req.cookies.bling_access_token;
   if (!token && req.headers["x-bling-token"]) {
     token = req.headers["x-bling-token"] as string;
   }
-  return token;
+  if (token) return token;
+
+  let refreshToken = req.cookies.bling_refresh_token;
+  if (!refreshToken && req.headers["x-bling-refresh-token"]) {
+    refreshToken = req.headers["x-bling-refresh-token"] as string;
+  }
+  if (!refreshToken) return null;
+
+  try {
+    const credentials = Buffer.from(
+      `${BLING_CLIENT_ID}:${BLING_CLIENT_SECRET}`,
+    ).toString("base64");
+    
+    const response = await axios.post(
+      "https://www.bling.com.br/Api/v3/oauth/token",
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+      {
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "1.0",
+        },
+      },
+    );
+
+    const { access_token, refresh_token: new_refresh_token, expires_in } = response.data;
+
+    res.cookie("bling_access_token", access_token, {
+      secure: true,
+      sameSite: process.env.VERCEL ? "lax" : "none",
+      httpOnly: true,
+      maxAge: expires_in * 1000,
+    });
+
+    if (new_refresh_token) {
+      res.cookie("bling_refresh_token", new_refresh_token, {
+        secure: true,
+        sameSite: process.env.VERCEL ? "lax" : "none",
+        httpOnly: true,
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+      });
+      res.setHeader("x-new-bling-refresh-token", new_refresh_token);
+    }
+
+    res.setHeader("x-new-bling-access-token", access_token);
+    res.setHeader("Access-Control-Expose-Headers", "x-new-bling-access-token, x-new-bling-refresh-token");
+
+    return access_token;
+  } catch (error: any) {
+    console.error("Failed to refresh Bling token", error.response?.data || error.message);
+    res.clearCookie("bling_access_token");
+    res.clearCookie("bling_refresh_token");
+    return null;
+  }
 };
 
 // Protect all /api routes
@@ -240,7 +305,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 
 app.get("/api/products/stock/:id", async (req, res) => {
   const { id } = req.params;
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
 
   if (!token) {
     return res.status(401).json({ error: "No Bling token found" });
@@ -276,14 +341,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
 
     res.json({ saldoFisicoTotal: 0, saldoVirtualTotal: 0, depositoId: null });
   } catch (error: any) {
-    console.error(
-      "Error fetching stock:",
-      error.response?.data || error.message,
-    );
-    res.status(error.response?.status || 500).json({
-      error: "Failed to fetch stock",
-      details: error.response?.data,
-    });
+    handleBlingError(error, "Error fetching stock:", res);
   }
 });
 
@@ -291,7 +349,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
 app.post("/api/products/stock/:id", async (req, res) => {
   const { id } = req.params;
   const { quantidade, depositoId } = req.body;
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
 
   if (!token) {
     return res.status(401).json({ error: "No Bling token found" });
@@ -335,21 +393,14 @@ app.post("/api/products/stock/:id", async (req, res) => {
 
     res.json(response.data);
   } catch (error: any) {
-    console.error(
-      "Error updating stock:",
-      error.response?.data || error.message,
-    );
-    res.status(error.response?.status || 500).json({
-      error: "Failed to update stock",
-      details: error.response?.data,
-    });
+    handleBlingError(error, "Error updating stock:", res);
   }
 });
 
 // Proxy to get product
 app.get("/api/products/search", async (req, res) => {
   const { q, criterio } = req.query;
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
 
   if (!token) {
     return res.status(401).json({ error: "No Bling token found" });
@@ -411,21 +462,14 @@ app.get("/api/products/search", async (req, res) => {
 
     res.json(results);
   } catch (error: any) {
-    console.error(
-      "Error fetching products:",
-      error.response?.data || error.message,
-    );
-    res.status(error.response?.status || 500).json({
-      error: "Failed to fetch products",
-      details: error.response?.data,
-    });
+    handleBlingError(error, "Error fetching products:", res);
   }
 });
 
 // Get full product details
 app.get("/api/products/:id", async (req, res) => {
   const id = req.params.id;
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
 
   if (!token) return res.status(401).json({ error: "No Bling token found" });
 
@@ -438,21 +482,14 @@ app.get("/api/products/:id", async (req, res) => {
     );
     res.json(response.data.data);
   } catch (error: any) {
-    console.error(
-      "Error fetching product details:",
-      error.response?.data || error.message,
-    );
-    res.status(error.response?.status || 500).json({
-      error: "Failed to fetch product details",
-      details: error.response?.data,
-    });
+    handleBlingError(error, "Error fetching product details:", res);
   }
 });
 
 // Save product details
 app.put("/api/products/:id", async (req, res) => {
   const id = req.params.id;
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
 
   if (!token) return res.status(401).json({ error: "No Bling token found" });
 
@@ -468,14 +505,7 @@ app.put("/api/products/:id", async (req, res) => {
     );
     res.json(response.data);
   } catch (error: any) {
-    console.error(
-      "Error updating product:",
-      error.response?.data || error.message,
-    );
-    res.status(error.response?.status || 500).json({
-      error: "Failed to update product",
-      details: error.response?.data,
-    });
+    handleBlingError(error, "Error updating product:", res);
   }
 });
 
@@ -520,7 +550,7 @@ app.post(
 );
 
 app.get("/api/me", async (req, res) => {
-  const token = getBlingToken(req);
+  const token = await getBlingToken(req, res);
   if (!token) return res.json({ connected: false });
   return res.json({ connected: true });
 });

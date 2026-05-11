@@ -99,8 +99,19 @@ export default function App() {
       toast.error("Sua sessão expirou. Por favor, faça login novamente.");
     };
 
+    const handleBlingAuthError = () => {
+      setIsConnected(false);
+      localStorage.removeItem("bling_access_token");
+      localStorage.removeItem("bling_refresh_token");
+      toast.error("Sua sessão no Bling expirou. Por favor, conecte novamente.");
+    };
+
     window.addEventListener("auth_error", handleAuthError);
-    return () => window.removeEventListener("auth_error", handleAuthError);
+    window.addEventListener("bling_auth_error", handleBlingAuthError);
+    return () => {
+      window.removeEventListener("auth_error", handleAuthError);
+      window.removeEventListener("bling_auth_error", handleBlingAuthError);
+    };
   }, []);
 
   useEffect(() => {
