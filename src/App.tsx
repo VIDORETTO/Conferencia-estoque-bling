@@ -685,6 +685,8 @@ function ProductDetailsEditor({
   const modifications = useRef<string[]>([]);
 
   // Fetch actual stock if needed - Bling v3 /estoques
+  const [codigoBarras, setCodigoBarras] = useState<string>("");
+
   useEffect(() => {
     fetchStock();
     fetchFullProduct();
@@ -695,6 +697,14 @@ function ProductDetailsEditor({
       const res = await apiFetch(`/api/products/${product.id}`);
       if (res.ok) {
         const data = await res.json();
+        
+        // Grab barcode/GTIN if present
+        if (data.codigo) { // In case the SKU changed or has more info
+          // we can leave codigo as is, because it's from props initialized
+        }
+        if (data.codigoBarras) setCodigoBarras(data.codigoBarras);
+        else if (data.gtin) setCodigoBarras(data.gtin);
+
         let allImages: string[] = [];
         if (data.midia?.imagens) {
           const { imagensURL, externas, internas } = data.midia.imagens;
@@ -775,8 +785,12 @@ function ProductDetailsEditor({
     const cleanScannedCode = /^\s*[\d\s]+\s*$/.test(scannedCode) ? scannedCode.replace(/\s+/g, "") : scannedCode.trim();
     
     const cleanCodigo = /^\s*[\d\s]+\s*$/.test(codigo) ? codigo.replace(/\s+/g, "") : codigo.trim();
-    
-    if (cleanScannedCode.toUpperCase() === cleanCodigo.toUpperCase()) {
+    const cleanCodigoBarras = /^\s*[\d\s]+\s*$/.test(codigoBarras) ? codigoBarras.replace(/\s+/g, "") : codigoBarras.trim();
+
+    const isValid = cleanScannedCode.toUpperCase() === cleanCodigo.toUpperCase() || 
+                    (cleanCodigoBarras && cleanScannedCode.toUpperCase() === cleanCodigoBarras.toUpperCase());
+
+    if (isValid) {
       setRealQty((prev) => (prev === "" ? 1 : Number(prev) + 1));
 
       // Play a short bip sound

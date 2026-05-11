@@ -359,8 +359,8 @@ app.get("/api/products/search", async (req, res) => {
     // Bling V3 products endpoint
     const headers = { Authorization: `Bearer ${token}` };
 
-    // We search by both code and name, and combine results
-    const [byCode, byName] = await Promise.allSettled([
+    // We search by code, name, barcode directly, and using criterio 5 (exact barcode match in v2)
+    const [byCode, byName, byBarcode, byCriterio5] = await Promise.allSettled([
       axios.get("https://www.bling.com.br/Api/v3/produtos", {
         headers,
         params: { codigo: q, limite: 10 },
@@ -368,6 +368,14 @@ app.get("/api/products/search", async (req, res) => {
       axios.get("https://www.bling.com.br/Api/v3/produtos", {
         headers,
         params: { nome: q, limite: 10 },
+      }),
+      axios.get("https://www.bling.com.br/Api/v3/produtos", {
+        headers,
+        params: { codigoBarras: q, limite: 10 },
+      }),
+      axios.get("https://www.bling.com.br/Api/v3/produtos", {
+        headers,
+        params: { criterio: 5, codigo: q, limite: 10 },
       }),
     ]);
 
@@ -379,6 +387,22 @@ app.get("/api/products/search", async (req, res) => {
 
     if (byName.status === "fulfilled" && byName.value.data?.data) {
       for (const item of byName.value.data.data) {
+        if (!results.find((r) => r.id === item.id)) {
+          results.push(item);
+        }
+      }
+    }
+
+    if (byBarcode.status === "fulfilled" && byBarcode.value.data?.data) {
+      for (const item of byBarcode.value.data.data) {
+        if (!results.find((r) => r.id === item.id)) {
+          results.push(item);
+        }
+      }
+    }
+
+    if (byCriterio5.status === "fulfilled" && byCriterio5.value.data?.data) {
+      for (const item of byCriterio5.value.data.data) {
         if (!results.find((r) => r.id === item.id)) {
           results.push(item);
         }
