@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import * as xlsx from "xlsx";
 import { Toaster, toast } from "sonner";
-import { Html5Qrcode } from "html5-qrcode";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
 import {
   Card,
@@ -152,7 +152,7 @@ export default function App() {
 
   if (isAppAuthenticated === null)
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex h-[100dvh] items-center justify-center">
         Carregando...
       </div>
     );
@@ -163,14 +163,14 @@ export default function App() {
 
   if (isConnected === null)
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex h-[100dvh] items-center justify-center">
         Carregando Bling...
       </div>
     );
 
   if (!isConnected) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center bg-zinc-50 p-4 dark:bg-zinc-950">
+      <div className="flex h-[100dvh] flex-col items-center justify-center bg-zinc-50 p-4 dark:bg-zinc-950">
         <Toaster />
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
@@ -193,7 +193,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex min-h-screen bg-zinc-50 dark:bg-zinc-950 px-4 py-8">
+    <div className="flex min-h-[100dvh] bg-zinc-50 dark:bg-zinc-950 px-4 pt-8 pb-32 md:pb-8">
       <Toaster />
       <div className="mx-auto w-full max-w-5xl">
         <div className="mb-6 flex items-center justify-between">
@@ -264,7 +264,7 @@ function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
   };
 
   return (
-    <div className="flex h-screen flex-col items-center justify-center bg-zinc-50 p-4 dark:bg-zinc-950">
+    <div className="flex h-[100dvh] flex-col items-center justify-center bg-zinc-50 p-4 dark:bg-zinc-950">
       <Toaster />
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
@@ -320,11 +320,15 @@ function ConferenceBoard() {
 
   const searchProduct = async (term: string) => {
     if (!term.trim()) return;
+    
+    // If the term is only numbers and spaces (e.g. from OCR or barcode with spaces), remove the spaces
+    const cleanTerm = /^\s*[\d\s]+\s*$/.test(term) ? term.replace(/\s+/g, "") : term.trim();
+    
     setIsSearching(true);
     try {
       // First try exactly by code/ean
       const res = await apiFetch(
-        `/api/products/search?q=${encodeURIComponent(term)}`,
+        `/api/products/search?q=${encodeURIComponent(cleanTerm)}`,
       );
       const data = await res.json();
 
@@ -767,7 +771,12 @@ function ProductDetailsEditor({
   };
 
   const handleBarcodeScan = (scannedCode: string) => {
-    if (scannedCode.trim().toUpperCase() === codigo.trim().toUpperCase()) {
+    // If the scanned code is numbers with spaces, remove spaces
+    const cleanScannedCode = /^\s*[\d\s]+\s*$/.test(scannedCode) ? scannedCode.replace(/\s+/g, "") : scannedCode.trim();
+    
+    const cleanCodigo = /^\s*[\d\s]+\s*$/.test(codigo) ? codigo.replace(/\s+/g, "") : codigo.trim();
+    
+    if (cleanScannedCode.toUpperCase() === cleanCodigo.toUpperCase()) {
       setRealQty((prev) => (prev === "" ? 1 : Number(prev) + 1));
 
       // Play a short bip sound
@@ -1204,14 +1213,25 @@ function BarcodeScanner({
       startPromise = html5QrCode.start(
         { facingMode },
         {
-          fps: 5,
+          fps: 10,
           qrbox: { width: 250, height: 150 },
-        },
+          aspectRatio: 1.0,
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+          ],
+          useBarCodeDetectorIfSupported: true,
+        } as any,
         (decodedText) => {
           // Prevent duplicate fast scans
           if (isScanning.current) return;
           isScanning.current = true;
-          onScanRef.current(decodedText);
+          // Clean up the code by removing any spaces
+          const sanitizedText = decodedText.replace(/\s+/g, "");
+          onScanRef.current(sanitizedText);
           setTimeout(() => {
             isScanning.current = false;
           }, 1500); // 1.5s delay between scans
@@ -1295,7 +1315,7 @@ function BarcodeScanner({
           <br />O bip ocorre automaticamente.
         </div>
       </div>
-      <div className="p-6 bg-zinc-900">
+      <div className="p-6 pb-36 md:pb-6 bg-zinc-900 border-t border-zinc-800">
         <Button
           onClick={onClose}
           variant="secondary"
