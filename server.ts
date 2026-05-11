@@ -129,6 +129,10 @@ app.use("/api", requireAppAuth);
 
 // Get Redirect URI (handle both dev/prod URL)
 const getRedirectUri = (req: express.Request) => {
+  if (process.env.REDIRECT_URI) {
+    return process.env.REDIRECT_URI;
+  }
+  
   if (process.env.APP_URL) {
     return `${process.env.APP_URL}/api/auth/callback`;
   }
