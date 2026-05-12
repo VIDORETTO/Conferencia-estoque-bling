@@ -319,7 +319,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
           Authorization: `Bearer ${token}`,
         },
         params: {
-          "idsProdutos[]": id,
+          idsProdutos: [Number(id)],
         },
       },
     );
@@ -372,7 +372,7 @@ app.post("/api/products/stock/:id", async (req, res) => {
 
     const payload = {
       produto: { id: Number(id) },
-      deposito: { id: targetDeposito },
+      deposito: { id: Number(targetDeposito) },
       operacao: "B",
       preco: 0,
       custo: 0,
@@ -410,8 +410,7 @@ app.get("/api/products/search", async (req, res) => {
     // Bling V3 products endpoint
     const headers = { Authorization: `Bearer ${token}` };
 
-    // We search by code, name, and barcode (criterio 4, or 5 if undocumented).
-    // To prevent returning random items when a parameter is ignored, we filter the results exactly.
+    // We search by code, name, and barcode (criterio 5 is used for exact/barcode in Bling API).
     const cleanQ = q ? String(q).trim() : "";
     const isNumeric = /^\d+$/.test(cleanQ);
 
@@ -426,18 +425,17 @@ app.get("/api/products/search", async (req, res) => {
       })
     ];
 
-    if (isNumeric) {
-       // Criterio 4 (codigo de barras) ou 5
+    if (isNumeric && cleanQ.length > 5) {
        searches.push(
          axios.get("https://www.bling.com.br/Api/v3/produtos", {
            headers,
-           params: { criterio: 4, codigo: cleanQ, limite: 15 },
+           params: { codigoBarras: cleanQ, limite: 15 },
          })
        );
        searches.push(
          axios.get("https://www.bling.com.br/Api/v3/produtos", {
            headers,
-           params: { codigoBarras: cleanQ, limite: 15 },
+           params: { criterio: 5, codigo: cleanQ, limite: 15 },
          })
        );
     }
@@ -445,34 +443,35 @@ app.get("/api/products/search", async (req, res) => {
     const responses = await Promise.allSettled(searches);
 
     const results: any[] = [];
+    
+    // Log rejections for debugging
+    for (const response of responses) {
+      if (response.status === "rejected") {
+         console.error("Search rejection:", response.reason?.response?.data || response.reason?.message);
+      }
+    }
 
     for (const response of responses) {
       if (response.status === "fulfilled" && response.value.data?.data) {
         for (const item of response.value.data.data) {
           if (!results.find((r) => r.id === item.id)) {
-             // Let's ensure the item matches somewhat our query to avoid displaying random items
-             let matches = false;
-             const queryUpper = cleanQ.toUpperCase();
-             if (item.codigo && String(item.codigo).toUpperCase().includes(queryUpper)) matches = true;
-             if (item.nome && String(item.nome).toUpperCase().includes(queryUpper)) matches = true;
-             
-             // Barcodes in newer Bling versions could be in codigoBarras or something? 
-             // We do a strict validation: if the query is numeric and long (barcode), 
-             // and the API returned an item without the query in codigo or nome, we check if it matches its barcode
-             // Wait, the API response doesn't always include the full 'gtin' or 'codigoBarras' in the list view.
-             // If we searched by barcode and it returned this item, there's a chance the API found it by barcode.
-             // But if the parameter was IGNORED, Bling returns the first products.
-             // To be sure, if `query` is numeric and we're not sure, we can still include it if `matches` is true.
-             // But wait! If we don't have the barcode in the list view, how do we know it's a valid match?
-             // If the API works, it returns ONLY 1 item usually for a barcode!
-             // So if the response has <= 2 items, it's highly likely a real match!
-             if (response.value.data.data.length <= 3) {
-                 matches = true;
-             }
-             
-             if (matches) {
-               results.push(item);
-             }
+            // We want to verify if the server ignored the barcode filter.
+            // If we search by 'codigoBarras' (which is not officially string-documented sometimes),
+            // Bling might return 100 random items if ignored.
+            // But if the user types a Barcode, we still want to show matches!
+            let matches = false;
+            const qStrUpper = cleanQ.toUpperCase();
+            if (item.codigo && String(item.codigo).toUpperCase().includes(qStrUpper)) matches = true;
+            if (item.nome && String(item.nome).toUpperCase().includes(qStrUpper)) matches = true;
+            
+            // If the user's query exactly matches a returned product's GTIN or EAN that might be buried in the object
+            // (Wait, list endpoint might not return GTIN. Wait, sometimes it does?)
+            // If the returned list is very small (<= 3), then Bling PROBABLY filtered it correctly!
+            if (response.value.data.data.length <= 3) matches = true;
+
+            if (matches) {
+              results.push(item);
+            }
           }
         }
       }
