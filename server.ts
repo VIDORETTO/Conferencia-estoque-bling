@@ -108,7 +108,9 @@ const requireAppAuth = (
     req.path === "/app-login" ||
     req.path === "/app-session" ||
     req.path === "/app-logout" ||
-    req.path === "/debug-creds"
+    req.path === "/debug-creds" ||
+    req.path === "/auth/callback" ||
+    req.path === "/auth/url"
   ) {
     return next();
   }
