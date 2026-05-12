@@ -162,7 +162,7 @@ const getBlingToken = async (req: express.Request, res: express.Response): Promi
 
     res.cookie("bling_access_token", access_token, {
       secure: true,
-      sameSite: process.env.VERCEL ? "lax" : "none",
+      sameSite: "none",
       httpOnly: true,
       maxAge: expires_in * 1000,
     });
@@ -170,7 +170,7 @@ const getBlingToken = async (req: express.Request, res: express.Response): Promi
     if (new_refresh_token) {
       res.cookie("bling_refresh_token", new_refresh_token, {
         secure: true,
-        sameSite: process.env.VERCEL ? "lax" : "none",
+        sameSite: "none",
         httpOnly: true,
         maxAge: 30 * 24 * 60 * 60 * 1000,
       });
@@ -216,7 +216,7 @@ app.get("/api/auth/url", (req, res) => {
   // Set state in cookie to verify later (basic CSRF)
   res.cookie("oauth_state", state, {
     secure: true,
-    sameSite: process.env.VERCEL ? "lax" : "none",
+    sameSite: "none",
     httpOnly: true,
     maxAge: 10 * 60 * 1000, // 10 mins
   });
@@ -235,8 +235,13 @@ app.get("/api/auth/url", (req, res) => {
 app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
   const { code, state } = req.query;
 
+  console.log("OAuth Callback - headers:", req.headers.cookie);
+  console.log("OAuth Callback - cookies:", req.cookies);
+  console.log("OAuth Callback - query state:", state);
+
   if (!state || state !== req.cookies.oauth_state) {
-    return res.status(403).send("CSRF verification failed");
+    console.error("CSRF verification failed", { state, cookie: req.cookies?.oauth_state });
+    return res.status(403).send("CSRF verification failed. Por favor, tente conectar novamente e certifique-se de que os cookies estão ativados.");
   }
 
   // Exchange code for token
@@ -264,7 +269,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 
     res.cookie("bling_access_token", access_token, {
       secure: true,
-      sameSite: process.env.VERCEL ? "lax" : "none",
+      sameSite: "none",
       httpOnly: true,
       maxAge: expires_in * 1000,
     });
@@ -272,7 +277,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
     if (refresh_token) {
       res.cookie("bling_refresh_token", refresh_token, {
         secure: true,
-        sameSite: process.env.VERCEL ? "lax" : "none",
+        sameSite: "none",
         httpOnly: true,
         maxAge: 30 * 24 * 60 * 60 * 1000,
       });
