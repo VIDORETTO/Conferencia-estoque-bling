@@ -145,7 +145,13 @@ export default function App() {
     try {
       const response = await apiFetch("/api/auth/url");
       if (!response.ok) throw new Error("Failed to get auth URL");
-      const { url } = await response.json();
+      const { url, state } = await response.json();
+
+      // Store the state locally as a fallback for CSRF verification
+      // in case the oauth_state cookie is not sent by the browser
+      if (state) {
+        localStorage.setItem("oauth_state", state);
+      }
 
       const authWindow = window.open(
         url,

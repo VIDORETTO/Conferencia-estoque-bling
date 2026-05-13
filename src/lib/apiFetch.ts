@@ -3,15 +3,18 @@ export const apiFetch = async (...args: Parameters<typeof fetch>) => {
   const token = localStorage.getItem("app_auth_token");
   const blingToken = localStorage.getItem("bling_access_token");
   const blingRefreshToken = localStorage.getItem("bling_refresh_token");
-  if (token || blingToken || blingRefreshToken) {
-    config = config || {};
-    config.headers = {
-      ...config.headers,
-    };
-    if (token) (config.headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
-    if (blingToken) (config.headers as Record<string, string>)["x-bling-token"] = blingToken;
-    if (blingRefreshToken) (config.headers as Record<string, string>)["x-bling-refresh-token"] = blingRefreshToken;
-  }
+  const oauthState = localStorage.getItem("oauth_state");
+  
+  config = config || {};
+  if (!config.headers) config.headers = {};
+  const headers = config.headers as Record<string, string>;
+
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (blingToken) headers["x-bling-token"] = blingToken;
+  if (blingRefreshToken) headers["x-bling-refresh-token"] = blingRefreshToken;
+  // Pass the OAuth state as a fallback header for CSRF verification
+  if (oauthState) headers["x-oauth-state"] = oauthState;
+
   const response = await fetch(resource, config);
   
   if (response.headers.has("x-new-bling-access-token")) {
@@ -25,8 +28,9 @@ export const apiFetch = async (...args: Parameters<typeof fetch>) => {
   
   if (response.status === 401 && typeof window !== "undefined") {
     // Only dispatch for unexpected 401s, not during login checks
-    if (resource !== "/api/app-session" && resource !== "/api/app-login" && resource !== "/api/me") {
-      // Check if it's a bling token error by reading the response without consuming it completely by using clone
+    const urlStr = typeof resource === "string" ? resource : (resource instanceof Request ? resource.url : "");
+    if (urlStr !== "/api/app-session" && urlStr !== "/api/app-login" && urlStr !== "/api/me") {
+      // Check if it's a bling token error by reading the response without consuming it completely
       let isBlingError = false;
       try {
         const cloned = response.clone();

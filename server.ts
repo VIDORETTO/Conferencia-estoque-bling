@@ -99,19 +99,22 @@ app.get("/api/app-session", (req, res) => {
 });
 
 // Middleware to protect internal API calls
+const PUBLIC_API_PATHS = [
+  "/app-login",
+  "/app-session",
+  "/app-logout",
+  "/debug-creds",
+  "/auth/callback",
+  "/auth/url",
+  "/me",
+];
+
 const requireAppAuth = (
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
 ) => {
-  if (
-    req.path === "/app-login" ||
-    req.path === "/app-session" ||
-    req.path === "/app-logout" ||
-    req.path === "/debug-creds" ||
-    req.path === "/auth/callback" ||
-    req.path === "/auth/url"
-  ) {
+  if (PUBLIC_API_PATHS.includes(req.path)) {
     return next();
   }
   let token = req.cookies.app_auth_token;
@@ -185,8 +188,16 @@ const getBlingToken = async (req: express.Request, res: express.Response): Promi
     return access_token;
   } catch (error: any) {
     console.error("Failed to refresh Bling token", error.response?.data || error.message);
-    res.clearCookie("bling_access_token");
-    res.clearCookie("bling_refresh_token");
+    res.clearCookie("bling_access_token", {
+      secure: true,
+      sameSite: "none",
+      httpOnly: true,
+    });
+    res.clearCookie("bling_refresh_token", {
+      secure: true,
+      sameSite: "none",
+      httpOnly: true,
+    });
     return null;
   }
 };
@@ -216,9 +227,12 @@ app.get("/api/auth/url", (req, res) => {
   const state = Math.random().toString(36).substring(7);
 
   // Set state in cookie to verify later (basic CSRF)
+  // Using "lax" here because the redirect callback is a top-level GET navigation,
+  // which works correctly with sameSite=lax. Also saves the state server-side
+  // via a custom header fallback in case the cookie is blocked.
   res.cookie("oauth_state", state, {
     secure: true,
-    sameSite: "none",
+    sameSite: process.env.VERCEL ? "lax" : "lax",
     httpOnly: true,
     maxAge: 10 * 60 * 1000, // 10 mins
   });
@@ -231,7 +245,8 @@ app.get("/api/auth/url", (req, res) => {
   });
 
   const authUrl = `https://www.bling.com.br/Api/v3/oauth/authorize?${params}`;
-  res.json({ url: authUrl });
+  // Return the state to the frontend so it can be stored as a fallback
+  res.json({ url: authUrl, state });
 });
 
 app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
@@ -241,9 +256,26 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
   console.log("OAuth Callback - cookies:", req.cookies);
   console.log("OAuth Callback - query state:", state);
 
-  if (!state || state !== req.cookies.oauth_state) {
-    console.error("CSRF verification failed", { state, cookie: req.cookies?.oauth_state });
-    return res.status(403).send("CSRF verification failed. Por favor, tente conectar novamente e certifique-se de que os cookies estão ativados.");
+  // Try getting state from cookie first, then fallback to session-like query parameter
+  let storedState = req.cookies.oauth_state;
+  
+  // Fallback: if state cookie is missing (e.g., blocked by browser SameSite policy),
+  // try to get it from a custom header or query param the client may have saved
+  if (!storedState && req.headers["x-oauth-state"]) {
+    storedState = req.headers["x-oauth-state"] as string;
+  }
+
+  if (!state || !storedState || state !== storedState) {
+    console.error("CSRF verification failed", { 
+      state, 
+      storedState, 
+      hasCookie: !!req.cookies.oauth_state,
+      hasHeader: !!req.headers["x-oauth-state"],
+      cookies: req.cookies 
+    });
+    return res.status(403).send(
+      "CSRF verification failed. Por favor, tente conectar novamente e certifique-se de que os cookies estão ativados."
+    );
   }
 
   // Exchange code for token
