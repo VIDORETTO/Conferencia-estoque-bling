@@ -460,9 +460,11 @@ app.post("/api/products/stock/:id", async (req, res) => {
   }
 });
 
-// Proxy to get product
+// Product search with prioritized queries (code > barcode > name)
+// Uses Bling API v3 /produtos endpoint with specific filters.
+// Falls back through different search strategies automatically.
 app.get("/api/products/search", async (req, res) => {
-  const { q, criterio } = req.query;
+  const { q } = req.query;
   const token = await getBlingToken(req, res);
 
   if (!token) {
@@ -470,77 +472,122 @@ app.get("/api/products/search", async (req, res) => {
   }
 
   try {
-    // Bling V3 products endpoint
     const headers = { Authorization: `Bearer ${token}` };
-
-    // We search by code, name, and barcode (criterio 5 is used for exact/barcode in Bling API).
     const cleanQ = q ? String(q).trim() : "";
-    const isNumeric = /^\d+$/.test(cleanQ);
-
-    const searches: Promise<any>[] = [
-      axios.get("https://www.bling.com.br/Api/v3/produtos", {
-        headers,
-        params: { codigo: cleanQ, limite: 15 },
-      }),
-      axios.get("https://www.bling.com.br/Api/v3/produtos", {
-        headers,
-        params: { nome: cleanQ, limite: 15 },
-      })
-    ];
-
-    if (isNumeric && cleanQ.length > 5) {
-       searches.push(
-         axios.get("https://www.bling.com.br/Api/v3/produtos", {
-           headers,
-           params: { codigoBarras: cleanQ, limite: 15 },
-         })
-       );
-       searches.push(
-         axios.get("https://www.bling.com.br/Api/v3/produtos", {
-           headers,
-           params: { criterio: 5, codigo: cleanQ, limite: 15 },
-         })
-       );
+    
+    if (!cleanQ) {
+      return res.json([]);
     }
 
-    const responses = await Promise.allSettled(searches);
-
+    const isNumeric = /^\d+$/.test(cleanQ);
     const results: any[] = [];
-    
-    // Log rejections for debugging
-    for (const response of responses) {
-      if (response.status === "rejected") {
-         console.error("Search rejection:", response.reason?.response?.data || response.reason?.message);
+    const seenIds = new Set<number>();
+
+    // Helper to add unique results
+    const addUniqueResults = (items: any[]) => {
+      for (const item of items) {
+        if (!seenIds.has(item.id)) {
+          seenIds.add(item.id);
+          results.push(item);
+        }
+      }
+    };
+
+    // Strategy 1: Search by EXACT code (most specific)
+    try {
+      const byCode = await axios.get("https://www.bling.com.br/Api/v3/produtos", {
+        headers,
+        params: { codigo: cleanQ, limite: 5 },
+      });
+      if (byCode.data?.data) {
+        addUniqueResults(byCode.data.data);
+      }
+    } catch (e: any) {
+      console.error("Code search failed:", e.response?.data || e.message);
+    }
+
+    // Strategy 2: If numeric and > 5 chars, try barcode (codigoBarras)
+    if (isNumeric && cleanQ.length > 5) {
+      try {
+        const byBarcode = await axios.get("https://www.bling.com.br/Api/v3/produtos", {
+          headers,
+          params: { codigoBarras: cleanQ, limite: 5 },
+        });
+        if (byBarcode.data?.data) {
+          // IMPORTANT: Bling API v3 often IGNORES the codigoBarras filter
+          // and returns ALL products (up to limite). If we got exactly 0 or 1 result,
+          // the filter worked. If more than 1, the filter was likely ignored.
+          const barcodeResults = byBarcode.data.data;
+          if (barcodeResults.length <= 2) {
+            // Filter worked correctly - these ARE barcode matches
+            addUniqueResults(barcodeResults);
+          } else {
+            // Filter was ignored - only include items where codigoBarras matches EXACTLY
+            for (const item of barcodeResults) {
+              const itemBarcode = item.codigoBarras || item.gtin || "";
+              if (String(itemBarcode) === cleanQ && !seenIds.has(item.id)) {
+                seenIds.add(item.id);
+                results.push(item);
+              }
+            }
+          }
+        }
+      } catch (e: any) {
+        console.error("Barcode search failed:", e.response?.data || e.message);
       }
     }
 
-    for (const response of responses) {
-      if (response.status === "fulfilled" && response.value.data?.data) {
-        for (const item of response.value.data.data) {
-          if (!results.find((r) => r.id === item.id)) {
-            // We want to verify if the server ignored the barcode filter.
-            // If we search by 'codigoBarras' (which is not officially string-documented sometimes),
-            // Bling might return 100 random items if ignored.
-            // But if the user types a Barcode, we still want to show matches!
-            let matches = false;
-            const qStrUpper = cleanQ.toUpperCase();
-            if (item.codigo && String(item.codigo).toUpperCase().includes(qStrUpper)) matches = true;
-            if (item.nome && String(item.nome).toUpperCase().includes(qStrUpper)) matches = true;
-            
-            // If the user's query exactly matches a returned product's GTIN or EAN that might be buried in the object
-            // (Wait, list endpoint might not return GTIN. Wait, sometimes it does?)
-            // If the returned list is very small (<= 3), then Bling PROBABLY filtered it correctly!
-            if (response.value.data.data.length <= 3) matches = true;
+    // Strategy 3: Search by name (least specific, but catches everything)
+    // Only if we have fewer than 3 results so far (avoid too many results)
+    if (results.length < 3) {
+      try {
+        const byName = await axios.get("https://www.bling.com.br/Api/v3/produtos", {
+          headers,
+          params: { nome: cleanQ, limite: 15 },
+        });
+        if (byName.data?.data) {
+          addUniqueResults(byName.data.data);
+        }
+      } catch (e: any) {
+        console.error("Name search failed:", e.response?.data || e.message);
+      }
+    }
 
-            if (matches) {
+    // Strategy 4: If still no results and numeric, try partial code match
+    // Some products may have codes that contain the search term
+    if (results.length === 0 && isNumeric) {
+      try {
+        // Try with blank codigo to get ALL products, then filter (last resort)
+        const allProducts = await axios.get("https://www.bling.com.br/Api/v3/produtos", {
+          headers,
+          params: { situacao: "A", limite: 20 },
+        });
+        if (allProducts.data?.data) {
+          for (const item of allProducts.data.data) {
+            const itemCode = String(item.codigo || "");
+            if (itemCode.includes(cleanQ) && !seenIds.has(item.id)) {
+              seenIds.add(item.id);
               results.push(item);
             }
           }
         }
+      } catch (e: any) {
+        console.error("Fallback search failed:", e.response?.data || e.message);
       }
     }
 
-    res.json(results);
+    // Map image URLs for the frontend
+    const mappedResults = results.map((item: any) => ({
+      ...item,
+      // Ensure imagemURL is set properly (frontend also does this, but be safe)
+      imagemURL:
+        item.midia?.imagens?.imagensURL?.[0]?.link ||
+        item.midia?.imagens?.externas?.[0]?.link ||
+        item.midia?.imagens?.internas?.[0]?.link ||
+        "",
+    }));
+
+    res.json(mappedResults);
   } catch (error: any) {
     handleBlingError(error, "Error fetching products:", res);
   }
