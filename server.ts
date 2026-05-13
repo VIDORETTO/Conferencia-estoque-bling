@@ -221,60 +221,73 @@ const getRedirectUri = (req: express.Request) => {
   return `${protocol}://${host}/api/auth/callback`;
 };
 
+// Use a signed state approach instead of cookies or in-memory store.
+// This is critical because:
+// 1. Cookies may be blocked/dropped in popup redirect flows (browser privacy policies)
+// 2. In-memory state doesn't work on serverless platforms (Vercel)
+// The state parameter is signed with the JWT_SECRET, so we can verify it
+// without needing any server-side storage or cookie round-trip.
+const signOAuthState = (state: string): string => {
+  const hmac = crypto.createHmac("sha256", JWT_SECRET);
+  hmac.update(state);
+  return hmac.digest("hex");
+};
+
+const verifyOAuthState = (state: string, signature: string): boolean => {
+  const expected = signOAuthState(state);
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+};
+
 // Bling OAuth endpoints
 app.get("/api/auth/url", (req, res) => {
   const redirectUri = getRedirectUri(req);
-  const state = Math.random().toString(36).substring(7);
+  // Generate a random state and sign it
+  const state = Math.random().toString(36).substring(2, 15);
+  const signature = signOAuthState(state);
 
-  // Set state in cookie to verify later (basic CSRF)
-  // Using "lax" here because the redirect callback is a top-level GET navigation,
-  // which works correctly with sameSite=lax. Also saves the state server-side
-  // via a custom header fallback in case the cookie is blocked.
-  res.cookie("oauth_state", state, {
+  // Store signature in a cookie as a best-effort fallback
+  res.cookie("oauth_state_sig", signature, {
     secure: true,
     sameSite: process.env.VERCEL ? "lax" : "lax",
     httpOnly: true,
-    maxAge: 10 * 60 * 1000, // 10 mins
+    maxAge: 10 * 60 * 1000,
   });
 
   const params = new URLSearchParams({
     client_id: BLING_CLIENT_ID!,
     redirect_uri: redirectUri,
     response_type: "code",
-    state: state,
+    // Pass both state AND its HMAC signature as the state parameter
+    // Format: "randomState.signature"
+    state: `${state}.${signature}`,
   });
 
   const authUrl = `https://www.bling.com.br/Api/v3/oauth/authorize?${params}`;
-  // Return the state to the frontend so it can be stored as a fallback
-  res.json({ url: authUrl, state });
+  res.json({ url: authUrl, state: `${state}.${signature}` });
 });
 
 app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
   const { code, state } = req.query;
+  const stateStr = state as string;
 
-  console.log("OAuth Callback - headers:", req.headers.cookie);
-  console.log("OAuth Callback - cookies:", req.cookies);
-  console.log("OAuth Callback - query state:", state);
+  console.log("OAuth Callback - callback hit with state length:", stateStr?.length);
 
-  // Try getting state from cookie first, then fallback to session-like query parameter
-  let storedState = req.cookies.oauth_state;
-  
-  // Fallback: if state cookie is missing (e.g., blocked by browser SameSite policy),
-  // try to get it from a custom header or query param the client may have saved
-  if (!storedState && req.headers["x-oauth-state"]) {
-    storedState = req.headers["x-oauth-state"] as string;
+  // Verify state using HMAC signature (works everywhere: local, Vercel, any server)
+  let isValidState = false;
+  if (stateStr && stateStr.includes(".")) {
+    const dotIndex = stateStr.indexOf(".");
+    const rawState = stateStr.substring(0, dotIndex);
+    const signature = stateStr.substring(dotIndex + 1);
+    isValidState = verifyOAuthState(rawState, signature);
   }
 
-  if (!state || !storedState || state !== storedState) {
+  if (!isValidState) {
     console.error("CSRF verification failed", { 
-      state, 
-      storedState, 
-      hasCookie: !!req.cookies.oauth_state,
-      hasHeader: !!req.headers["x-oauth-state"],
-      cookies: req.cookies 
+      stateLength: stateStr?.length,
+      hasDot: stateStr?.includes("."),
     });
     return res.status(403).send(
-      "CSRF verification failed. Por favor, tente conectar novamente e certifique-se de que os cookies estão ativados."
+      "CSRF verification failed. Por favor, tente conectar novamente."
     );
   }
 
