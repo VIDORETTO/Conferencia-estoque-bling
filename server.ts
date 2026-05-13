@@ -18,10 +18,13 @@ const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
 const handleBlingError = (error: any, defaultMessage: string, res: express.Response) => {
   console.error(defaultMessage, error.response?.data || error.message);
-  if (error.response?.status === 401) {
-     res.status(401).json({ error: "No Bling token found", details: error.response?.data });
-  } else {
-     res.status(error.response?.status || 500).json({ error: defaultMessage, details: error.response?.data });
+  const statusCode = error.response?.status || 500;
+  if (!res.headersSent) {
+    if (statusCode === 401) {
+      res.status(401).json({ error: "No Bling token found", details: error.response?.data });
+    } else {
+      res.status(statusCode).json({ error: defaultMessage, details: error.response?.data });
+    }
   }
 };
 

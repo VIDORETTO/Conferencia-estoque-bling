@@ -704,6 +704,11 @@ function ProductDetailsEditor({
   // Fetch actual stock if needed - Bling v3 /estoques
   const [codigoBarras, setCodigoBarras] = useState<string>("");
 
+  // Reset modifications when product changes
+  useEffect(() => {
+    modifications.current = [];
+  }, [product.id]);
+
   useEffect(() => {
     fetchStock();
     fetchFullProduct();
