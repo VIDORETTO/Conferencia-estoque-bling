@@ -22,11 +22,11 @@ export function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) 
         body: JSON.stringify({ username, password }),
       });
 
+      const text = await res.text();
       let data;
       try {
-        data = await res.json();
-      } catch (err) {
-        const text = await res.text();
+        data = JSON.parse(text);
+      } catch {
         throw new Error(
           `Server returned non-JSON: ${res.status} ${text.substring(0, 100)}`,
         );
