@@ -16,22 +16,29 @@ const BLING_CLIENT_ID = process.env.BLING_CLIENT_ID;
 const BLING_CLIENT_SECRET = process.env.BLING_CLIENT_SECRET;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
-const handleBlingError = (error: any, defaultMessage: string, res: express.Response) => {
-  console.error(defaultMessage, error.response?.data || error.message);
-  const statusCode = error.response?.status || 500;
+axios.defaults.timeout = 15000;
+
+const handleBlingError = (error: unknown, defaultMessage: string, res: express.Response) => {
+  const err = error as { response?: { data?: unknown; status?: number }; message?: string };
+  console.error(defaultMessage, err.response?.data || err.message);
+  const statusCode = err.response?.status || 500;
   if (!res.headersSent) {
     if (statusCode === 401) {
-      res.status(401).json({ error: "No Bling token found", details: error.response?.data });
+      res.status(401).json({ error: "No Bling token found", details: err.response?.data });
     } else {
-      res.status(statusCode).json({ error: defaultMessage, details: error.response?.data });
+      res.status(statusCode).json({ error: defaultMessage, details: err.response?.data });
     }
   }
 };
 
 const APP_USERNAME = process.env.APP_USERNAME;
 const APP_PASSWORD = process.env.APP_PASSWORD;
-const JWT_SECRET =
-  process.env.JWT_SECRET || APP_PASSWORD || "some-secure-default-secret";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  console.error("[FATAL] JWT_SECRET não definido. Defina JWT_SECRET nas variáveis de ambiente.");
+  process.exit(1);
+}
 
 // Utility for safe string comparison
 const safeCompare = (a: string, b: string) => {
@@ -43,10 +50,6 @@ const safeCompare = (a: string, b: string) => {
 };
 
 // App session endpoints
-app.get("/api/debug-creds", (req, res) =>
-  res.json({ u: APP_USERNAME, p: APP_PASSWORD }),
-);
-
 app.post("/api/app-login", async (req, res) => {
   // Artificial delay to mitigate brute-force attacks
   await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -68,8 +71,8 @@ app.post("/api/app-login", async (req, res) => {
     });
     res.cookie("app_auth_token", token, {
       httpOnly: true,
-      secure: true,
-      sameSite: process.env.VERCEL ? "lax" : "none",
+      secure: !!process.env.VERCEL,
+      sameSite: process.env.VERCEL ? "lax" : "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     res.json({ success: true, token });
@@ -81,8 +84,8 @@ app.post("/api/app-login", async (req, res) => {
 app.post("/api/app-logout", (req, res) => {
   res.clearCookie("app_auth_token", {
     httpOnly: true,
-    secure: true,
-    sameSite: process.env.VERCEL ? "lax" : "none",
+    secure: !!process.env.VERCEL,
+    sameSite: "lax",
   });
   res.json({ success: true });
 });
@@ -106,9 +109,6 @@ const PUBLIC_API_PATHS = [
   "/app-login",
   "/app-session",
   "/app-logout",
-  "/debug-creds",
-  "/auth/callback",
-  "/auth/url",
   "/me",
 ];
 
@@ -133,6 +133,41 @@ const requireAppAuth = (
   }
 };
 
+interface RefreshTokenResult {
+  access_token: string;
+  new_refresh_token: string;
+  expires_in: number;
+}
+
+interface BlingProduct {
+  id: number;
+  nome: string;
+  codigo: string;
+  codigoBarras?: string;
+  gtin?: string;
+  preco: number;
+  tipo: string;
+  situacao: string;
+  formato: string;
+  descricaoCurta?: string;
+  midia?: {
+    imagens?: {
+      imagensURL?: Array<{ link: string }>;
+      externas?: Array<{ link: string }>;
+      internas?: Array<{ link: string }>;
+    };
+  };
+}
+
+interface BlingStockItem {
+  produto: { id: number };
+  saldoFisicoTotal: number;
+  saldoVirtualTotal: number;
+  depositos?: Array<{ id: number }>;
+}
+
+let pendingRefresh: Promise<RefreshTokenResult | null> | null = null;
+
 const getBlingToken = async (req: express.Request, res: express.Response): Promise<string | null> => {
   let token = req.cookies.bling_access_token;
   if (!token && req.headers["x-bling-token"]) {
@@ -146,6 +181,43 @@ const getBlingToken = async (req: express.Request, res: express.Response): Promi
   }
   if (!refreshToken) return null;
 
+  if (!pendingRefresh) {
+    pendingRefresh = doRefreshToken(refreshToken).finally(() => {
+      pendingRefresh = null;
+    });
+  }
+
+  return pendingRefresh.then((result) => {
+    if (!result) return null;
+
+    const { access_token, new_refresh_token, expires_in } = result;
+    const isSecure = !!process.env.VERCEL;
+
+    res.cookie("bling_access_token", access_token, {
+      secure: isSecure,
+      sameSite: isSecure ? "none" : "lax",
+      httpOnly: true,
+      maxAge: expires_in * 1000,
+    });
+
+    if (new_refresh_token) {
+      res.cookie("bling_refresh_token", new_refresh_token, {
+        secure: isSecure,
+        sameSite: isSecure ? "none" : "lax",
+        httpOnly: true,
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+      });
+      res.setHeader("x-new-bling-refresh-token", new_refresh_token);
+    }
+
+    res.setHeader("x-new-bling-access-token", access_token);
+    res.setHeader("Access-Control-Expose-Headers", "x-new-bling-access-token, x-new-bling-refresh-token");
+
+    return access_token;
+  });
+};
+
+const doRefreshToken = async (refreshToken: string) => {
   try {
     const credentials = Buffer.from(
       `${BLING_CLIENT_ID}:${BLING_CLIENT_SECRET}`,
@@ -167,40 +239,10 @@ const getBlingToken = async (req: express.Request, res: express.Response): Promi
     );
 
     const { access_token, refresh_token: new_refresh_token, expires_in } = response.data;
-
-    res.cookie("bling_access_token", access_token, {
-      secure: true,
-      sameSite: "none",
-      httpOnly: true,
-      maxAge: expires_in * 1000,
-    });
-
-    if (new_refresh_token) {
-      res.cookie("bling_refresh_token", new_refresh_token, {
-        secure: true,
-        sameSite: "none",
-        httpOnly: true,
-        maxAge: 30 * 24 * 60 * 60 * 1000,
-      });
-      res.setHeader("x-new-bling-refresh-token", new_refresh_token);
-    }
-
-    res.setHeader("x-new-bling-access-token", access_token);
-    res.setHeader("Access-Control-Expose-Headers", "x-new-bling-access-token, x-new-bling-refresh-token");
-
-    return access_token;
-  } catch (error: any) {
-    console.error("Failed to refresh Bling token", error.response?.data || error.message);
-    res.clearCookie("bling_access_token", {
-      secure: true,
-      sameSite: "none",
-      httpOnly: true,
-    });
-    res.clearCookie("bling_refresh_token", {
-      secure: true,
-      sameSite: "none",
-      httpOnly: true,
-    });
+    return { access_token, new_refresh_token, expires_in };
+  } catch (error) {
+    const err = error as { response?: { data?: unknown }; message?: string };
+    console.error("Failed to refresh Bling token", err.response?.data || err.message);
     return null;
   }
 };
@@ -222,6 +264,14 @@ const getRedirectUri = (req: express.Request) => {
   const host = req.headers["x-forwarded-host"] || req.get("host");
 
   return `${protocol}://${host}/api/auth/callback`;
+};
+
+const getAppOrigin = (req: express.Request): string => {
+  try {
+    return new URL(getRedirectUri(req)).origin;
+  } catch {
+    return "*";
+  }
 };
 
 // Generate an OAuth state parameter as a self-contained JWT.
@@ -298,11 +348,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
       stateLength: stateStr?.length,
       hasTilde: stateStr?.includes("~"),
     });
-    // IMPORTANT: The state/cookie check is a defense-in-depth measure.
-    // Even if CSRF verification fails, we STILL try the OAuth exchange as a fallback.
-    // This prevents browser cookie blocking from breaking the entire OAuth flow.
-    // The real security comes from our client_secret which only our server knows.
-    console.warn("CSRF check failed but proceeding with OAuth exchange as fallback...");
+    return res.status(403).send("Falha na verificação CSRF. Tente novamente.");
   }
 
   // Exchange code for token
@@ -328,32 +374,33 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 
     const { access_token, refresh_token, expires_in } = response.data;
 
+    const isSecure = !!process.env.VERCEL;
+
     res.cookie("bling_access_token", access_token, {
-      secure: true,
-      sameSite: "none",
+      secure: isSecure,
+      sameSite: isSecure ? "none" : "lax",
       httpOnly: true,
       maxAge: expires_in * 1000,
     });
 
     if (refresh_token) {
       res.cookie("bling_refresh_token", refresh_token, {
-        secure: true,
-        sameSite: "none",
+        secure: isSecure,
+        sameSite: isSecure ? "none" : "lax",
         httpOnly: true,
         maxAge: 30 * 24 * 60 * 60 * 1000,
       });
     }
 
+    const appOrigin = getAppOrigin(req);
     res.send(`
         <html>
           <body>
             <script>
               if (window.opener) {
                 window.opener.postMessage({ 
-                  type: 'OAUTH_AUTH_SUCCESS',
-                  access_token: "${access_token}",
-                  refresh_token: "${refresh_token || ""}"
-                }, '*');
+                  type: 'OAUTH_AUTH_SUCCESS'
+                }, ${JSON.stringify(appOrigin)});
                 window.close();
               } else {
                 window.location.href = '/';
@@ -394,7 +441,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
     if (data && data.length > 0) {
       // Find the record for this product ID
       const productStock = data.find(
-        (item: any) => String(item.produto.id) === String(id),
+        (item: BlingStockItem) => String(item.produto.id) === String(id),
       );
       if (productStock) {
         return res.json({
@@ -406,7 +453,7 @@ app.get("/api/products/stock/:id", async (req, res) => {
     }
 
     res.json({ saldoFisicoTotal: 0, saldoVirtualTotal: 0, depositoId: null });
-  } catch (error: any) {
+  } catch (error) {
     handleBlingError(error, "Error fetching stock:", res);
   }
 });
@@ -436,6 +483,10 @@ app.post("/api/products/stock/:id", async (req, res) => {
       }
     }
 
+    if (!targetDeposito) {
+      return res.status(400).json({ error: "Nenhum depósito encontrado para realizar o balanço de estoque." });
+    }
+
     const payload = {
       produto: { id: Number(id) },
       deposito: { id: Number(targetDeposito) },
@@ -458,7 +509,7 @@ app.post("/api/products/stock/:id", async (req, res) => {
     );
 
     res.json(response.data);
-  } catch (error: any) {
+  } catch (error) {
     handleBlingError(error, "Error updating stock:", res);
   }
 });
@@ -483,11 +534,11 @@ app.get("/api/products/search", async (req, res) => {
     }
 
     const isNumeric = /^\d+$/.test(cleanQ);
-    const results: any[] = [];
+    const results: BlingProduct[] = [];
     const seenIds = new Set<number>();
 
     // Helper to add unique results
-    const addUniqueResults = (items: any[]) => {
+    const addUniqueResults = (items: BlingProduct[]) => {
       for (const item of items) {
         if (!seenIds.has(item.id)) {
           seenIds.add(item.id);
@@ -505,8 +556,9 @@ app.get("/api/products/search", async (req, res) => {
       if (byCode.data?.data) {
         addUniqueResults(byCode.data.data);
       }
-    } catch (e: any) {
-      console.error("Code search failed:", e.response?.data || e.message);
+    } catch (e) {
+      const err = e as { response?: { data?: unknown }; message?: string };
+      console.error("Code search failed:", err.response?.data || err.message);
     }
 
     // Strategy 2: If numeric and > 5 chars, try barcode (codigoBarras)
@@ -535,8 +587,9 @@ app.get("/api/products/search", async (req, res) => {
             }
           }
         }
-      } catch (e: any) {
-        console.error("Barcode search failed:", e.response?.data || e.message);
+      } catch (e) {
+        const err = e as { response?: { data?: unknown }; message?: string };
+        console.error("Barcode search failed:", err.response?.data || err.message);
       }
     }
 
@@ -551,8 +604,9 @@ app.get("/api/products/search", async (req, res) => {
         if (byName.data?.data) {
           addUniqueResults(byName.data.data);
         }
-      } catch (e: any) {
-        console.error("Name search failed:", e.response?.data || e.message);
+      } catch (e) {
+        const err = e as { response?: { data?: unknown }; message?: string };
+        console.error("Name search failed:", err.response?.data || err.message);
       }
     }
 
@@ -574,13 +628,14 @@ app.get("/api/products/search", async (req, res) => {
             }
           }
         }
-      } catch (e: any) {
-        console.error("Fallback search failed:", e.response?.data || e.message);
+      } catch (e) {
+        const err = e as { response?: { data?: unknown }; message?: string };
+        console.error("Fallback search failed:", err.response?.data || err.message);
       }
     }
 
     // Map image URLs for the frontend
-    const mappedResults = results.map((item: any) => ({
+    const mappedResults = results.map((item: BlingProduct) => ({
       ...item,
       // Ensure imagemURL is set properly (frontend also does this, but be safe)
       imagemURL:
@@ -591,7 +646,7 @@ app.get("/api/products/search", async (req, res) => {
     }));
 
     res.json(mappedResults);
-  } catch (error: any) {
+  } catch (error) {
     handleBlingError(error, "Error fetching products:", res);
   }
 });
@@ -611,7 +666,7 @@ app.get("/api/products/:id", async (req, res) => {
       },
     );
     res.json(response.data.data);
-  } catch (error: any) {
+  } catch (error) {
     handleBlingError(error, "Error fetching product details:", res);
   }
 });
@@ -634,7 +689,7 @@ app.put("/api/products/:id", async (req, res) => {
       },
     );
     res.json(response.data);
-  } catch (error: any) {
+  } catch (error) {
     handleBlingError(error, "Error updating product:", res);
   }
 });
@@ -644,7 +699,6 @@ app.put("/api/products/:id", async (req, res) => {
 // let's proxy it to keep it safe.
 app.post(
   "/api/upload-image",
-  express.json({ limit: "50mb" }),
   async (req, res) => {
     const { imageBase64 } = req.body; // base64 without data:image...
     const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
@@ -665,14 +719,16 @@ app.post(
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
           },
+          timeout: 30000,
         },
       );
 
       res.json({ url: response.data.data.url });
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as { response?: { data?: unknown }; message?: string };
       console.error(
         "Error uploading image:",
-        error.response?.data || error.message,
+        err.response?.data || err.message,
       );
       res.status(500).json({ error: "Failed to upload image" });
     }

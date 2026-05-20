@@ -1,6 +1,6 @@
 {
   "name": "Conferência Estoque Bling",
   "description": "App para conferir estoques via API do Bling com upload de imagens e leitor de código de barras nativo.",
-  "requestFramePermissions": ["camera"],
+  "requestFramePermissions": ["camera", "file-upload"],
   "majorCapabilities": []
 }
