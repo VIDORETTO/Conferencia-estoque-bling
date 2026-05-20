@@ -37,7 +37,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!JWT_SECRET) {
   console.error("[FATAL] JWT_SECRET não definido. Defina JWT_SECRET nas variáveis de ambiente.");
-  process.exit(1);
+  // Não chamamos process.exit() em serverless — a função continuará mas retornará erros nas rotas que precisam de JWT.
 }
 
 // Utility for safe string comparison
@@ -51,33 +51,38 @@ const safeCompare = (a: string, b: string) => {
 
 // App session endpoints
 app.post("/api/app-login", async (req, res) => {
-  // Artificial delay to mitigate brute-force attacks
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  try {
+    // Artificial delay to mitigate brute-force attacks
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  const { username, password } = req.body;
+    const { username, password } = req.body;
 
-  if (!APP_USERNAME || !APP_PASSWORD) {
-    return res.status(500).json({
-      error: "As credenciais do app não estão configuradas no servidor.",
-    });
-  }
+    if (!APP_USERNAME || !APP_PASSWORD) {
+      return res.status(500).json({
+        error: "As credenciais do app não estão configuradas no servidor.",
+      });
+    }
 
-  const isUserValid = safeCompare(username || "", APP_USERNAME);
-  const isPassValid = safeCompare(password || "", APP_PASSWORD);
+    const isUserValid = safeCompare(username || "", APP_USERNAME);
+    const isPassValid = safeCompare(password || "", APP_PASSWORD);
 
-  if (isUserValid && isPassValid) {
-    const token = jwt.sign({ user: username }, JWT_SECRET, {
-      expiresIn: "7d",
-    });
-    res.cookie("app_auth_token", token, {
-      httpOnly: true,
-      secure: !!process.env.VERCEL,
-      sameSite: process.env.VERCEL ? "lax" : "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-    res.json({ success: true, token });
-  } else {
-    res.status(401).json({ error: "Credenciais inválidas" });
+    if (isUserValid && isPassValid) {
+      const token = jwt.sign({ user: username }, JWT_SECRET, {
+        expiresIn: "7d",
+      });
+      res.cookie("app_auth_token", token, {
+        httpOnly: true,
+        secure: !!process.env.VERCEL,
+        sameSite: process.env.VERCEL ? "lax" : "lax",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+      res.json({ success: true, token });
+    } else {
+      res.status(401).json({ error: "Credenciais inválidas" });
+    }
+  } catch (error) {
+    console.error("[LOGIN_ERROR]", error);
+    res.status(500).json({ error: "Erro interno do servidor ao processar login." });
   }
 });
 
@@ -736,9 +741,14 @@ app.post(
 );
 
 app.get("/api/me", async (req, res) => {
-  const token = await getBlingToken(req, res);
-  if (!token) return res.json({ connected: false });
-  return res.json({ connected: true });
+  try {
+    const token = await getBlingToken(req, res);
+    if (!token) return res.json({ connected: false });
+    return res.json({ connected: true });
+  } catch (error) {
+    console.error("[ME_ERROR]", error);
+    res.json({ connected: false });
+  }
 });
 
 // Export the app for Vercel
