@@ -751,6 +751,14 @@ app.get("/api/me", async (req, res) => {
   }
 });
 
+// Global error handler — evita FUNCTION_INVOCATION_FAILED em erros não capturados
+app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("[UNHANDLED_ERROR]", err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Erro interno do servidor." });
+  }
+});
+
 // Export the app for Vercel
 export default app;
 
